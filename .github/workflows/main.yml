@@ -39,6 +39,8 @@ jobs:
           subtitle: "Synced using Github Actions"
           description: "## Generate features with Deberta using a sklearn transformer"
           files: |
+            *.py
+            *.toml
             **/*.py
             **/*.json
             **/*.yaml
