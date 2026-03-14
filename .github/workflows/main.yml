@@ -34,7 +34,7 @@ jobs:
 
         with:
           ## Default is "{KAGGLE_USERNAME}/{GITHUB_REPO_NAME}" Where KAGGLE_USERNAME is a secret
-          # id: ${{ secrets.KAGGLE_USERNAME }}/kaggle--feedback-prize-ell
+          id: ${{ secrets.KAGGLE_USERNAME }}/cervical_nnunet
           title: "Code for Feedback Prize English Language Learning"
           subtitle: "Synced using Github Actions"
           description: "## Generate features with Deberta using a sklearn transformer"
