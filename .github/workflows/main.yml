@@ -29,8 +29,8 @@ jobs:
         uses: Nov05/action-push-kaggle-dataset@v1
         env:
           # Do not leak your credentials.
-          KAGGLE_USERNAME: "thuganh" # ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: "735485f971ff8aebf749f7845a3347be" # ${{ secrets.KAGGLE_KEY }}
+          KAGGLE_USERNAME:  ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
 
         with:
           ## Default is "{KAGGLE_USERNAME}/{GITHUB_REPO_NAME}" Where KAGGLE_USERNAME is a secret
