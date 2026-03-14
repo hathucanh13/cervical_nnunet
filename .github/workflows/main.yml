@@ -35,15 +35,8 @@ jobs:
         with:
           ## Default is "{KAGGLE_USERNAME}/{GITHUB_REPO_NAME}" Where KAGGLE_USERNAME is a secret
           id: ${{ secrets.KAGGLE_USERNAME }}/cervical-nnunet
-          title: "Code for Feedback Prize English Language Learning"
-          subtitle: "Synced using Github Actions"
-          description: "## Generate features with Deberta using a sklearn transformer"
+          title: cervical-nnunet
+          subtitle: Synced using Github Actions
+          description: Auto sync repo to Kaggle
           files: |
-            *.py
-            *.md
-            *.yml 
-            trainers
-            .gitignore
-            .gitattributes
-            requirements.txt
-          is_public: true
+            .
