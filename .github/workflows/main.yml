@@ -34,7 +34,7 @@ jobs:
 
         with:
           ## Default is "{KAGGLE_USERNAME}/{GITHUB_REPO_NAME}" Where KAGGLE_USERNAME is a secret
-          id: ${{ secrets.KAGGLE_USERNAME }}/cervical-nnunet
+          id: ${{ secrets.KAGGLE_USERNAME }}/cervicalnnunet
           title: cervical-nnunet
           subtitle: Synced using Github Actions
           description: Auto sync repo to Kaggle

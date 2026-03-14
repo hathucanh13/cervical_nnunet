@@ -1128,7 +1128,7 @@ class nnUNetTrainer(object):
         if self.label_manager.has_regions:
             predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
         else: 
-            # no need for softmax 
+            # no need for softmax
             output_seg = output.argmax(1)[:, None]
             predicted_segmentation_onehot = torch.zeros(output.shape, device=output.device, dtype=torch.float16)
             predicted_segmentation_onehot.scatter_(1, output_seg, 1)
