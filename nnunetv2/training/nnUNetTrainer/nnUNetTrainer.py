@@ -729,7 +729,7 @@ class nnUNetTrainer(object):
             ignore_axes = None
         transforms.append(
             SpatialTransform(
-                patch_size_spatial, patch_center_dist_from_border=0, random_crop=False, p_elastic_deform=0,
+                patch_size_spatial, patch_center_dist_from_border=0, random_crop=False, p_elastic_deform=0.2, #CERV: I ENABLED ELASTIC DEFORM
                 p_rotation=0.2,
                 rotation=rotation_for_DA, p_scaling=0.2, scaling=(0.7, 1.4), p_synchronize_scaling_across_axes=1,
                 bg_style_seg_sampling=False  # , mode_seg='nearest'
@@ -741,7 +741,7 @@ class nnUNetTrainer(object):
 
         transforms.append(RandomTransform(
             GaussianNoiseTransform(
-                noise_variance=(0, 0.1),
+                noise_variance=(0, 0.2), #CERV: I ADDED NOISE
                 p_per_channel=1,
                 synchronize_channels=True
             ), apply_probability=0.1
