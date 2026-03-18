@@ -1,6 +1,6 @@
-# Welcome to the new nnU-Net!
+# Welcome to the nnU-Net configured specifically for Cervical Cancer Segmentation!
 
-Click [here](https://github.com/MIC-DKFZ/nnUNet/tree/nnunetv1) if you were looking for the old one instead.
+Click [here](https://github.com/MIC-DKFZ/nnUNet) if you were looking for the original nnU-Net instead. Readme is in progress.
 
 Coming from V1? Check out the [TLDR Migration Guide](documentation/tldr_migration_guide_from_v1.md). Reading the rest of the documentation is still strongly recommended ;-)
 
