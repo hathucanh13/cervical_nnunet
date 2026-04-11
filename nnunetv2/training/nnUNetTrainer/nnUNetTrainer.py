@@ -729,7 +729,7 @@ class nnUNetTrainer(object):
             ignore_axes = None
         transforms.append(
             SpatialTransform(
-                patch_size_spatial, patch_center_dist_from_border=0, random_crop=False, p_elastic_deform=0.1, #CERV: I ENABLED ELASTIC DEFORM
+                patch_size_spatial, patch_center_dist_from_border=0, random_crop=False, p_elastic_deform=0.3, #CERV: I ENABLED ELASTIC DEFORM
                 p_rotation=0.2,
                 rotation=rotation_for_DA, p_scaling=0.2, scaling=(0.7, 1.4), p_synchronize_scaling_across_axes=1,
                 bg_style_seg_sampling=False  # , mode_seg='nearest'
@@ -741,7 +741,7 @@ class nnUNetTrainer(object):
 
         transforms.append(RandomTransform(
             GaussianNoiseTransform(
-                noise_variance=(0, 0.2), #CERV: I ADDED NOISE
+                noise_variance=(0, 0.25), #CERV: I ADDED NOISE
                 p_per_channel=1,
                 synchronize_channels=True
             ), apply_probability=0.1
@@ -763,11 +763,11 @@ class nnUNetTrainer(object):
         ))
         transforms.append(RandomTransform(
             ContrastTransform(
-                contrast_range=BGContrast((0.75, 1.25)),
+                contrast_range=BGContrast((0.65, 1.5)),
                 preserve_range=True,
                 synchronize_channels=False,
                 p_per_channel=1
-            ), apply_probability=0.15
+            ), apply_probability=0.2  #CERV: CHANGE THIS
         ))
         transforms.append(RandomTransform(
             SimulateLowResolutionTransform(
@@ -777,7 +777,7 @@ class nnUNetTrainer(object):
                 ignore_axes=ignore_axes,
                 allowed_channels=None,
                 p_per_channel=0.5
-            ), apply_probability=0.25
+            ), apply_probability=0.25 #CERV: CHANGE THIS TOO (todo)
         ))
         transforms.append(RandomTransform(
             GammaTransform(
@@ -915,8 +915,8 @@ class nnUNetTrainer(object):
         self.dataloader_train, self.dataloader_val = self.get_dataloaders()
          # #region added
         # ── save augmented preview ──────────────────────────────────────────────
-        if self.local_rank == 0:
-            self.save_augmented_samples(num_samples=5)
+        # if self.local_rank == 0:
+        #     self.save_augmented_samples(num_samples=5)
         # ────────────────────────────────────────────────────────────────────────
  # #region ended
         maybe_mkdir_p(self.output_folder)
