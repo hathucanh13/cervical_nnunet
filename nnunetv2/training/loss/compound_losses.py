@@ -3,6 +3,7 @@ from nnunetv2.training.loss.dice import SoftDiceLoss, MemoryEfficientSoftDiceLos
 from nnunetv2.training.loss.robust_ce_loss import RobustCrossEntropyLoss, TopKLoss
 from nnunetv2.utilities.helpers import softmax_helper_dim1
 from torch import nn
+from nnunetv2.training.loss.focal_loss import FocalLoss
 
 
 class DC_and_CE_loss(nn.Module):
@@ -154,3 +155,16 @@ class DC_and_topk_loss(nn.Module):
 
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
+
+class DiceFocalLoss(nn.Module):
+    def __init__(self, lambda_dice=0.5, lambda_focal=0.5, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.lambda_dice  = lambda_dice
+        self.lambda_focal = lambda_focal
+        self.dice_loss  = SoftDiceLoss(batch_dice=False, smooth=1e-5)
+        self.focal_loss = FocalLoss(gamma=gamma, alpha=alpha)
+
+    def forward(self, pred, target):
+        L_dice  = self.dice_loss(pred, target)
+        L_focal = self.focal_loss(pred, target)
+        return self.lambda_dice * L_dice + self.lambda_focal * L_focal
