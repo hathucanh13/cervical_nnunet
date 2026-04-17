@@ -61,7 +61,7 @@ class nnUNetTrainerDiceCELoss_noSmooth(nnUNetTrainer):
 
 class nnUNetTrainerDiceFocalLoss(nnUNetTrainer):
     def _build_loss(self):
-        print('Using Focal Loss with Dice Loss')
+        self.print_to_log_file('Using Focal Loss with Dice Loss')
         loss = FocalLoss({'batch_dice': self.configuration_manager.batch_dice,
                                 'smooth': 0, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
                                 ignore_label=self.label_manager.ignore_label,
