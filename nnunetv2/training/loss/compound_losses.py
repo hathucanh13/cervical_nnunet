@@ -157,14 +157,31 @@ class DC_and_topk_loss(nn.Module):
         return result
 
 class DiceFocalLoss(nn.Module):
-    def __init__(self, lambda_dice=0.5, lambda_focal=0.5, gamma=2.0, alpha=0.25):
+    def __init__(self, soft_dice_kwargs, ignore_label=None, gamma=2.0, alpha=0.25,
+                 lambda_dice=0.5, lambda_focal=0.5):
         super().__init__()
-        self.lambda_dice  = lambda_dice
+        self.lambda_dice = lambda_dice
         self.lambda_focal = lambda_focal
-        self.dice_loss  = SoftDiceLoss(batch_dice=False, smooth=1e-5)
-        self.focal_loss = FocalLoss(gamma=gamma, alpha=alpha)
+        self.ignore_label = ignore_label
 
-    def forward(self, pred, target):
-        L_dice  = self.dice_loss(pred, target)
-        L_focal = self.focal_loss(pred, target)
-        return self.lambda_dice * L_dice + self.lambda_focal * L_focal
+        # mirror exactly what DC_and_CE_loss does
+        self.dc = MemoryEfficientSoftDiceLoss(
+            apply_nonlin=softmax_helper_dim1,
+            **soft_dice_kwargs
+        )
+        self.focal = FocalLoss(gamma=gamma, alpha=alpha)
+
+    def forward(self, net_output, target):
+        if self.ignore_label is not None:
+            mask = target != self.ignore_label
+            target_dice = torch.where(mask, target, 0)
+            num_fg = mask.sum()
+        else:
+            target_dice = target
+            mask = None
+
+        dc_loss = self.dc(net_output, target_dice, loss_mask=mask)
+        focal_loss = self.focal(net_output, target[:, 0]) \
+            if (self.ignore_label is None or num_fg > 0) else 0
+
+        return self.lambda_dice * dc_loss + self.lambda_focal * focal_loss

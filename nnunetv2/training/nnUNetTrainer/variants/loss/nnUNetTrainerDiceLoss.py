@@ -60,17 +60,33 @@ class nnUNetTrainerDiceCELoss_noSmooth(nnUNetTrainer):
 
 class nnUNetTrainerFocalLoss(nnUNetTrainer):
     def _build_loss(self):
-        self.print_to_log_file("Using Focal Loss with gamma=2.0 and alpha=0.25")
-        loss = DiceFocalLoss(
-            lambda_dice=0.5,
-            lambda_focal=0.5,
-            gamma=2.0,    # tune this: 0.5–5.0 range
-            alpha=0.25    # tune this: 0.25 for rare foreground
-        )
-        # nnU-Net uses deep supervision — wrap the loss to handle
-        # predictions at multiple decoder scales automatically
-        deep_supervision_scales = self._get_deep_supervision_scales()
-        weights = [1 / (2 ** i) for i in range(len(deep_supervision_scales))]
-        weights = [w / sum(weights) for w in weights]   # normalize
+        self.print_to_log_file("Using DiceFocalLoss with gamma=2.0, alpha=0.25")
 
-        return DeepSupervisionWrapper(loss, weights)
+        if self.label_manager.has_regions:
+            raise NotImplementedError(
+                "DiceFocalLoss is not implemented for region-based labels. "
+                "Use nnUNetTrainer (DC_and_BCE_loss) instead."
+            )
+
+        loss = DiceFocalLoss(
+            soft_dice_kwargs={
+                'batch_dice': self.configuration_manager.batch_dice,
+                'smooth': 1e-5,
+                'do_bg': False,
+                'ddp': self.is_ddp
+            },
+            ignore_label=self.label_manager.ignore_label,
+            gamma=2.0,
+            alpha=0.25,
+            lambda_dice=0.5,
+            lambda_focal=0.5
+        )
+
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+            weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+
+        return loss
