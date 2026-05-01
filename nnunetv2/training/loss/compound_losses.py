@@ -154,3 +154,92 @@ class DC_and_topk_loss(nn.Module):
 
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
+
+class DC_CE_and_Boundary_loss(nn.Module):
+    def __init__(self, soft_dice_kwargs, ce_kwargs, weight_ce=1, weight_dice=1,
+                 weight_boundary=0.5, ignore_label=None,
+                 dice_class=MemoryEfficientSoftDiceLoss):
+        super().__init__()
+        self.weight_dice = weight_dice
+        self.weight_ce = weight_ce
+        self.weight_boundary = weight_boundary
+        self.ignore_label = ignore_label
+
+        if ignore_label is not None:
+            ce_kwargs['ignore_index'] = ignore_label
+
+        self.dc = dice_class(apply_nonlin=softmax_helper_dim1, **soft_dice_kwargs)
+        self.ce = RobustCrossEntropyLoss(**ce_kwargs)
+
+    def _get_boundary_mask(self, target):
+        """
+        Morphological boundary detection via erosion + dilation.
+        Returns a boolean mask that is True at boundary voxels only.
+        target: (B, H, W, D) integer labels
+        """
+        target_fg = (target > 0).float().unsqueeze(1)  # (B, 1, H, W, D)
+
+        # dilation: max-pool expands the foreground
+        dilated = F.max_pool3d(
+            target_fg, kernel_size=3, stride=1, padding=1
+        )
+        # erosion: min-pool shrinks the foreground
+        eroded = -F.max_pool3d(
+            -target_fg, kernel_size=3, stride=1, padding=1
+        )
+
+        # boundary = shell between eroded and dilated
+        boundary = (dilated - eroded).squeeze(1).bool()  # (B, H, W, D)
+        return boundary
+
+    def _boundary_loss(self, net_output, target):
+        """
+        CE loss reweighted 5x at boundary voxels.
+        target: (B, 1, H, W, D) — raw nnU-Net format
+        """
+        boundary = self._get_boundary_mask(target[:, 0])
+
+        if boundary.sum() == 0:
+            return torch.tensor(0.0, device=net_output.device,
+                                requires_grad=True)
+
+        # per-voxel CE — need reduction='none' for spatial weighting
+        per_voxel_ce = F.cross_entropy(
+            net_output, target[:, 0].long(),
+            ignore_index=self.ignore_label if self.ignore_label is not None else -100,
+            reduction='none'
+        )  # (B, H, W, D)
+
+        # 1x everywhere, 5x at boundary
+        weight_map = 1.0 + 4.0 * boundary.float()
+        weighted_loss = per_voxel_ce * weight_map
+
+        return weighted_loss.mean()
+
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+        """
+        net_output : (B, C, H, W, D) raw logits
+        target     : (B, 1, H, W, D) integer labels — standard nnU-Net format
+        """
+        if self.ignore_label is not None:
+            assert target.shape[1] == 1
+            mask = (target != self.ignore_label)
+            target_dice = torch.where(mask, target, 0)
+            num_fg = mask.sum()
+        else:
+            target_dice = target
+            mask = None
+            num_fg = None
+
+        dc_loss = self.dc(net_output, target_dice, loss_mask=mask) \
+            if self.weight_dice != 0 else 0
+
+        ce_loss = self.ce(net_output, target[:, 0]) \
+            if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
+
+        bd_loss = self._boundary_loss(net_output, target) \
+            if self.weight_boundary != 0 and (self.ignore_label is None or num_fg > 0) else 0
+
+        return (self.weight_dice * dc_loss +
+                self.weight_ce * ce_loss +
+                self.weight_boundary * bd_loss)
