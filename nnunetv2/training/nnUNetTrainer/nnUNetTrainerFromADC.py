@@ -72,42 +72,45 @@ class nnUNetTrainerFineTuneFromADC(nnUNetTrainer):
             ckpt_path, map_location=self.device, weights_only=False
         )
 
-        # pretrained keys — strip _orig_mod. if checkpoint was also compiled
-        pretrained_dict = {
-            k.replace('_orig_mod.', ''): v
-            for k, v in checkpoint['network_weights'].items()
-        }
+        # strip any wrapper prefixes from pretrained keys
+        # (torch.compile adds _orig_mod., DDP adds module.)
+        def strip_prefix(state_dict):
+            stripped = {}
+            for k, v in state_dict.items():
+                k = k.replace('_orig_mod.', '')
+                k = k.replace('module.', '')
+                stripped[k] = v
+            return stripped
 
-        # model keys — strip _orig_mod. added by torch.compile
-        raw_model_dict = {
-            k.replace('_orig_mod.', ''): v
-            for k, v in self.network.state_dict().items()
-        }
-        print('PRETRAINED keys sample:')
-        for k in list(pretrained_dict.keys())[:5]:
-            print(f'  {k}')
-
-        # print first 5 keys from model
-        print('MODEL keys sample:')
-        for k in list(self.network.state_dict().keys())[:5]:
-            print(f'  {k}')
+        pretrained_dict = strip_prefix(checkpoint['network_weights'])
+        model_dict_raw  = strip_prefix(self.network.state_dict())
 
         # match by stripped key and shape
         matched, skipped = {}, []
         for k, v in pretrained_dict.items():
-            if k in raw_model_dict and v.shape == raw_model_dict[k].shape:
+            if k in model_dict_raw and v.shape == model_dict_raw[k].shape:
                 matched[k] = v
             else:
                 reason = (
-                    f'model shape {tuple(raw_model_dict[k].shape)}'
-                    if k in raw_model_dict else 'MISSING'
+                    f'model shape {tuple(model_dict_raw[k].shape)}'
+                    if k in model_dict_raw else 'MISSING'
                 )
-                skipped.append(f'{k}: pretrained {tuple(v.shape)} vs {reason}')
+                skipped.append(
+                    f'{k}: pretrained {tuple(v.shape)} vs {reason}'
+                )
 
-        # load into the underlying uncompiled network
-        # hasattr check handles both compiled and non-compiled cases
-        target = getattr(self.network, '_orig_mod', self.network)
-        target.load_state_dict(matched, strict=False)
+        # load into the underlying unwrapped network
+        # DDP: self.network.module
+        # torch.compile: self.network._orig_mod
+        # plain: self.network
+        if hasattr(self.network, 'module'):
+            # DDP wrapper
+            self.network.module.load_state_dict(matched, strict=False)
+        elif hasattr(self.network, '_orig_mod'):
+            # torch.compile wrapper
+            self.network._orig_mod.load_state_dict(matched, strict=False)
+        else:
+            self.network.load_state_dict(matched, strict=False)
 
         self.print_to_log_file(
             f'Loaded  : {len(matched)} / {len(pretrained_dict)} layers'
