@@ -23,6 +23,9 @@ class nnUNetTrainerFineTuneFromADC(nnUNetTrainer):
     initial_lr     = 1e-3
     max_num_epochs = 250
 
+    def _do_i_compile(self):
+        return False
+
     def _get_pretrained_checkpoint_path(self):
         # nnUNet_results is the correct env variable name
         nnunet_results = os.environ.get('nnUNet_results')
@@ -80,6 +83,14 @@ class nnUNetTrainerFineTuneFromADC(nnUNetTrainer):
             k.replace('_orig_mod.', ''): v
             for k, v in self.network.state_dict().items()
         }
+        print('PRETRAINED keys sample:')
+        for k in list(pretrained_dict.keys())[:5]:
+            print(f'  {k}')
+
+        # print first 5 keys from model
+        print('MODEL keys sample:')
+        for k in list(self.network.state_dict().keys())[:5]:
+            print(f'  {k}')
 
         # match by stripped key and shape
         matched, skipped = {}, []
