@@ -2,16 +2,25 @@
 nnUNetMD_train_from_pretrain  —  entry point
 ─────────────────────────────────────────────
 Stage 2: load pretrained multimodal weights and run standard nnU-Net
-cross-validation on the ORIGINAL single-sequence dataset.
+cross-validation on a zero-filled version of the single-sequence dataset.
 
-Zero-filling of auxiliary channels is handled on the fly by
-nnUNetTrainerStage2 — no _MD dataset is created on disk.
+Instead of padding channels on the fly, we first materialise a new raw
+dataset where every auxiliary channel (beyond T2w / ch0) is written to
+disk as a zero-filled NIfTI that matches the anchor channel's geometry.
+This keeps the nnU-Net data pipeline completely standard — no custom
+trainer padding logic is needed.
 
-Steps:
+Steps
+─────
   1. Verify pretrain checkpoint exists (from nnUNetMD_metadata.json).
-  2. Preprocess the single-sequence dataset with Stage-1 plans
-     (correct geometry: patch_size, spacing) but single-channel normalization.
-  3. Run cross-validation, loading pretrained weights for each fold.
+  2. Create the zero-filled dataset on disk (Dataset{N}_ZF_{ss_name}/)
+     unless --skip-create-zf is given.
+  3. Preprocess the new zero-filled dataset with Stage-1 plans
+     (correct geometry: patch_size, spacing) and channel-aware normalization:
+       ch0        : ZScoreNormalization  (real T2w data)
+       ch1…chN-1  : NoNormalization      (zero-filled — must stay at 0.0)
+  4. Run cross-validation on the zero-filled dataset, loading pretrained
+     weights for each fold.
 """
 
 import argparse
@@ -20,6 +29,7 @@ from pathlib import Path
 
 from nnunetv2.modality_dropout.utils import (
     count_channels,
+    create_zerofilled_dataset,
     get_nnunet_base,
     load_metadata,
     load_plans,
@@ -35,10 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="nnUNetMD_train_from_pretrain",
         description=(
-            "Stage 2: load pretrained multimodal weights and run standard "
-            "nnU-Net cross-validation on the single-sequence dataset.\n"
-            "Zero-padding of auxiliary channels is applied on the fly — "
-            "no _MD dataset is created on disk.\n\n"
+            "Stage 2: load pretrained multimodal weights and run standard\n"
+            "nnU-Net cross-validation on a zero-filled single-sequence dataset.\n\n"
+            "A new raw dataset (Dataset{N}_ZF_{ss_name}) is created on disk\n"
+            "where every auxiliary channel is a zero-filled image matching\n"
+            "the T2w anchor geometry.  No on-the-fly padding is applied.\n\n"
             "Run 'nnUNetMD_pretrain' first."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -72,45 +83,65 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parallel processes for preprocessing (default: 8).",
     )
     p.add_argument(
+        "--skip-create-zf", action="store_true", default=False,
+        help=(
+            "Skip zero-filled dataset creation if it already exists "
+            "(e.g. when resuming a failed run)."
+        ),
+    )
+    p.add_argument(
         "--skip-preprocess", action="store_true", default=False,
         help="Skip preprocessing if already done in a previous run.",
+    )
+    p.add_argument(
+        "--zf-dataset-id", type=int, default=None,
+        help=(
+            "Override the numeric ID assigned to the new zero-filled dataset "
+            "(default: next available ID in nnUNet_raw)."
+        ),
     )
     return p
 
 
-def _prepare_ss_plans(pre_base: Path, mm_name: str, ss_name: str,
-                       n_ch_mm: int, n_ch_ss: int, plans_name: str) -> None:
+def _prepare_zf_plans(pre_base: Path, mm_name: str, zf_name: str,
+                      n_ch_mm: int, n_ch_ss: int, plans_name: str) -> None:
     """
-    Create Stage-2 plans for the single-sequence dataset by patching
-    Stage-1 plans with n_real_channels=n_ch_ss:
-      ch0        : ZScoreNormalization  (real data)
-      ch1…chN-1  : NoNormalization      (will be zero-padded on the fly)
+    Create Stage-2 plans for the zero-filled dataset by patching Stage-1
+    multimodal plans:
+      ch0               : ZScoreNormalization  (real T2w data)
+      ch1 … ch(N-1)     : NoNormalization      (zero-filled — must stay 0.0)
 
-    Geometry (patch_size, spacing) comes from Stage-1 plans so the
-    preprocessed data is compatible with the pretrained architecture.
+    Geometry (patch_size, spacing) comes from the multimodal Stage-1 plans,
+    ensuring the preprocessed data is compatible with the pretrained weights.
     """
     mm_plans = load_plans(pre_base, mm_name, plans_name)
-    ss_plans = load_plans(pre_base, ss_name, "nnUNetPlans")   # ss own default plans
+    # Use the mm plans as both source of geometry AND as the base to patch;
+    # we only need ZF-specific normalization overrides.
+    # The ZF dataset has n_ch_mm channels total, n_ch_ss of which are real.
+    import copy
+    zf_plans = copy.deepcopy(mm_plans)
 
-    patched = patch_multimodal_plans(
-        mm_plans,
-        ss_plans,
-        n_channels_mm   = n_ch_ss,      # ss dataset only has n_ch_ss channels
-        n_real_channels = n_ch_ss,      # all of them are real
+    cfg = zf_plans["configurations"]["3d_fullres"]
+    base_scheme = cfg.get("normalization_schemes",
+                          ["ZScoreNormalization"] * n_ch_mm)[0]
+
+    cfg["normalization_schemes"] = (
+        [base_scheme]         * n_ch_ss
+        + ["NoNormalization"] * (n_ch_mm - n_ch_ss)
     )
-    patched["dataset_name"] = ss_name
+    cfg["use_mask_for_norm"] = [False] * n_ch_mm
 
-    # Carry over nnUNetMD channel metadata so the trainer can read them
-    patched["nnUNetMD_n_channels_pretrained"] = n_ch_mm
-    patched["nnUNetMD_n_channels_single"]     = n_ch_ss
+    zf_plans["dataset_name"] = zf_name
+    # Carry over nnUNetMD channel metadata so nnUNetTrainerStage2 reads them
+    zf_plans["nnUNetMD_n_channels_pretrained"] = n_ch_mm
+    zf_plans["nnUNetMD_n_channels_single"]     = n_ch_ss
 
-    (pre_base / ss_name).mkdir(parents=True, exist_ok=True)
-    save_plans(pre_base, ss_name, patched, plans_name)
+    (pre_base / zf_name).mkdir(parents=True, exist_ok=True)
+    save_plans(pre_base, zf_name, zf_plans, plans_name)
 
-    cfg = patched["configurations"]["3d_fullres"]
     print(f"  patch_size            : {cfg['patch_size']}")
     print(f"  normalization_schemes : {cfg['normalization_schemes']}")
-    print(f"  n_channels_pretrained : {n_ch_mm}  (padding applied on the fly)")
+    print(f"  n_channels_pretrained : {n_ch_mm}  (all present on disk)")
 
 
 def main(argv=None) -> int:
@@ -136,37 +167,63 @@ def main(argv=None) -> int:
     n_ch_mm = meta["n_channels_multimodal"]
     n_ch_ss = meta["n_channels_single"]
 
-    print(f"\n[nnUNetMD] Stage 2 fine-tuning  (on-the-fly zero-padding)")
-    print(f"  Single-seq dataset : {ss_name}  (ID={ss_id})")
-    print(f"  Checkpoint         : {checkpoint}")
-    print(f"  Trainer            : {args.trainer}")
-    print(f"  Folds              : {args.folds}")
-    print(f"  Channel padding    : {n_ch_ss} → {n_ch_mm}  (at batch load time)")
+    # ── Step 1: Create zero-filled dataset on disk ────────────────────────────
+    if not args.skip_create_zf:
+        zf_id, zf_name, zf_path = create_zerofilled_dataset(
+            ss_raw   = ss_raw,
+            mm_raw   = mm_raw,
+            raw_base = raw_base,
+            new_id   = args.zf_dataset_id,
+        )
+    else:
+        # Retrieve from metadata (written by a previous run)
+        zf_name = meta.get("zerofilled_dataset")
+        zf_id   = meta.get("zerofilled_dataset_id")
+        if not zf_name:
+            print("[nnUNetMD] ERROR: --skip-create-zf used but no zero-filled "
+                  "dataset recorded in metadata.  Remove the flag for the first run.")
+            return 1
+        zf_path = raw_base / zf_name
+        if not zf_path.exists():
+            print(f"[nnUNetMD] ERROR: zero-filled dataset not found: {zf_path}")
+            return 1
+        print(f"[nnUNetMD] Using existing zero-filled dataset: {zf_name}")
 
-    # ── Step 1: Prepare Stage-2 plans for single-sequence dataset ─────────────
+    # Persist ZF dataset info in metadata so downstream tools can find it
+    update_metadata(pre_base, mm_name,
+                    zerofilled_dataset    = zf_name,
+                    zerofilled_dataset_id = zf_id)
+
+    print(f"\n[nnUNetMD] Stage 2 fine-tuning  (disk-based zero-filled dataset)")
+    print(f"  Zero-filled dataset : {zf_name}  (ID={zf_id})")
+    print(f"  Checkpoint          : {checkpoint}")
+    print(f"  Trainer             : {args.trainer}")
+    print(f"  Folds               : {args.folds}")
+    print(f"  Channel layout      : ch0=T2w (real), ch1–{n_ch_mm-1}=zeros on disk")
+
+    # ── Step 2: Prepare Stage-2 plans for zero-filled dataset ─────────────────
     if not args.skip_preprocess:
-        print(f"\n[nnUNetMD] Preparing Stage-2 plans for {ss_name} …")
-        _prepare_ss_plans(pre_base, mm_name, ss_name,
+        print(f"\n[nnUNetMD] Preparing Stage-2 plans for {zf_name} …")
+        _prepare_zf_plans(pre_base, mm_name, zf_name,
                           n_ch_mm, n_ch_ss, args.plans_name)
 
-        # Preprocess single-sequence dataset with Stage-1 geometry plans
-        # (-plans_name points to our patched file with the right patch_size/spacing)
-        print(f"\n[nnUNetMD] Preprocessing {ss_name} with {args.plans_name} …")
+        # Preprocess the zero-filled dataset with Stage-1 geometry
+        print(f"\n[nnUNetMD] Preprocessing {zf_name} with {args.plans_name} …")
         run_cmd(
             [
                 "nnUNetv2_preprocess",
-                "-d", str(ss_id),
+                "-d", str(zf_id),
                 "-c", "3d_fullres",
                 "-plans_name", args.plans_name,
                 "-np", str(args.num_processes),
             ],
-            description=f"preprocess {ss_name}",
+            description=f"preprocess {zf_name}",
         )
     else:
-        print(f"  [skip] Preprocessing skipped.")
+        print("  [skip] Preprocessing skipped.")
 
-    # ── Step 2: Cross-validation ──────────────────────────────────────────────
-    print(f"\n[nnUNetMD] Cross-validation on {ss_name}")
+    # ── Step 3: Cross-validation ──────────────────────────────────────────────
+    print(f"\n[nnUNetMD] Cross-validation on {zf_name}")
     failed = []
     for fold in args.folds:
         print(f"\n[nnUNetMD] ── fold {fold} ──")
@@ -174,7 +231,7 @@ def main(argv=None) -> int:
             run_cmd(
                 [
                     "nnUNetv2_train",
-                    str(ss_id),
+                    str(zf_id),
                     "3d_fullres",
                     str(fold),
                     "-tr",    args.trainer,
@@ -188,14 +245,14 @@ def main(argv=None) -> int:
             print(f"[nnUNetMD] WARNING fold {fold} failed: {e}")
             failed.append(fold)
 
-    # ── Step 3: Find best configuration ──────────────────────────────────────
+    # ── Step 4: Find best configuration ───────────────────────────────────────
     if not failed:
         print("\n[nnUNetMD] Finding best configuration …")
         try:
             run_cmd(
                 [
                     "nnUNetv2_find_best_configuration",
-                    str(ss_id),
+                    str(zf_id),
                     "-c", "3d_fullres",
                     "-tr", args.trainer,
                     "-p",  args.plans_name,
@@ -206,11 +263,12 @@ def main(argv=None) -> int:
             print("[nnUNetMD] find_best_configuration failed — run manually.")
     else:
         print(f"\n[nnUNetMD] WARNING: failed folds: {failed}\n"
-              "  Re-run with --skip-preprocess to skip data preparation.")
+              "  Re-run with --skip-create-zf --skip-preprocess to skip "
+              "data preparation.")
 
     print(
         f"\n[nnUNetMD] ✓ Stage 2 complete.\n"
-        f"  Results: {res_base / ss_name}"
+        f"  Results: {res_base / zf_name}"
         f"/{args.trainer}__{args.plans_name}__3d_fullres"
     )
     return 0 if not failed else 1

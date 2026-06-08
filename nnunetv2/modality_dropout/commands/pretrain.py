@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset_multimodal")
     p.add_argument("dataset_single_sequence")
     p.add_argument("--trainer", default="nnUNetTrainerModalityDropout")
-    p.add_argument("--plans-name", default="nnUNetPlans")
+    p.add_argument("--plans-name", default="nnUNetPlans_MD")
     p.add_argument(
         "--max-epochs", type=int, default=None,
         help=(
