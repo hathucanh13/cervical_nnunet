@@ -2,8 +2,10 @@
 nnunetv2.modality_dropout.utils
 ────────────────────────────────
 Shared helpers for the nnUNetMD pipeline.
-Supports NIfTI (.nii.gz / .nii) and NRRD (.nrrd / .seg.nrrd) via SimpleITK,
-which is already a hard dependency of nnU-Net.
+
+Image I/O (NIfTI and NRRD) is supported via SimpleITK for the dataset
+integrity check only.  Zero-filled channel creation is no longer needed —
+auxiliary channels are zero-padded on the fly by nnUNetTrainerStage2.
 """
 
 import json
@@ -14,38 +16,16 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
 import SimpleITK as sitk
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Image format helpers
+# Image format helpers  (used by verify_dataset_integrity only)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _NIFTI_EXTS = (".nii.gz", ".nii")
 _NRRD_EXTS  = (".seg.nrrd", ".nrrd")
 _ALL_EXTS   = _NIFTI_EXTS + _NRRD_EXTS
-
-
-def get_file_ending(dataset_json_path: Path) -> str:
-    """
-    Return the file extension declared in dataset.json (e.g. '.nii.gz', '.nrrd').
-    Falls back to auto-detection from imagesTr if the key is absent.
-    """
-    data   = json.loads(dataset_json_path.read_text())
-    ending = data.get("file_ending", "")
-    if ending:
-        return ending if ending.startswith(".") else f".{ending}"
-
-    images_dir = dataset_json_path.parent / "imagesTr"
-    for ext in _ALL_EXTS:
-        if any(images_dir.glob(f"*{ext}")):
-            return ext
-
-    raise ValueError(
-        f"Cannot determine file format for dataset at {dataset_json_path.parent}.\n"
-        "Add a 'file_ending' key to dataset.json (e.g. '.nii.gz' or '.nrrd')."
-    )
 
 
 def collect_image_files(images_dir: Path) -> list[Path]:
@@ -70,20 +50,8 @@ def strip_image_suffix(filename: str) -> str:
 
 
 def sitk_load(path: Path) -> sitk.Image:
+    """Load a NIfTI or NRRD image via SimpleITK."""
     return sitk.ReadImage(str(path))
-
-
-def sitk_zeros_like(reference: sitk.Image) -> sitk.Image:
-    """Zero-filled image with identical geometry to reference (Float32)."""
-    arr  = np.zeros(sitk.GetArrayFromImage(reference).shape, dtype=np.float32)
-    zero = sitk.GetImageFromArray(arr)
-    zero.CopyInformation(reference)
-    return zero
-
-
-def sitk_save(img: sitk.Image, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    sitk.WriteImage(img, str(path))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,7 +156,7 @@ def update_metadata(preprocessed_base: Path, multimodal_folder: str,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_plans(preprocessed_base: Path, folder_name: str,
-               plans_name: str = "nnUNetPlans_MD") -> dict:
+               plans_name: str = "nnUNetPlans") -> dict:
     path = preprocessed_base / folder_name / f"{plans_name}.json"
     if not path.exists():
         raise FileNotFoundError(f"Plans not found: {path}")
@@ -210,32 +178,27 @@ def patch_multimodal_plans(mm_plans: dict, ss_plans: dict,
     single-sequence plans, then set normalization schemes per channel:
 
       ch0 … ch(n_real_channels-1) : ZScoreNormalization  (real image data)
-      ch(n_real_channels) … chN-1 : NoNormalization       (zero-filled channels)
+      ch(n_real_channels) … chN-1 : NoNormalization       (auxiliary channels)
 
-    Args:
-        mm_plans        : plans dict for the multimodal dataset.
-        ss_plans        : plans dict for the single-sequence dataset.
-        n_channels_mm   : total number of channels in the multimodal dataset.
-        n_real_channels : channels with real data; the rest get NoNormalization.
-                          Defaults to n_channels_mm (all channels real — correct
-                          for the multimodal preprocessing stage where all
-                          channels contain genuine image data).
-                          Pass n_channels_single (e.g. 1) when patching the
-                          Stage-2 zero-filled dataset so auxiliary channels
-                          receive NoNormalization instead of ZScoreNormalization.
+    Used in two contexts:
 
-    Why NoNormalization on zero-filled channels matters:
-        ZScoreNormalization on an all-zero channel computes mean=0, std≈0, then
-        divides by (std + ε). The result is numerically stable (≈0) but
-        inconsistent with Stage-1 runtime behaviour: modality dropout zeros
-        channels AFTER nnU-Net has already applied normalisation during
-        preprocessing. NoNormalization keeps zero channels at exactly 0.0,
-        matching what the dropout trainer produces at training time.
+    1. Multimodal dataset (plan_and_preprocess):
+         n_real_channels = n_channels_mm  (all channels are real)
+         → ZScoreNormalization on every channel
+
+    2. Single-sequence Stage-2 dataset (train_from_pretrain):
+         n_real_channels = n_channels_single  (only the anchor channel is real)
+         → ZScoreNormalization on ch0 only; NoNormalization on ch1+
+         The auxiliary channels are not present on disk — they are zero-padded
+         on the fly by nnUNetTrainerStage2 at batch load time.
+         NoNormalization ensures that if zeros ever reach the preprocessor
+         (e.g. future disk-based fallback), they are left at exactly 0.0
+         rather than producing degenerate ZScore output.
     """
     import copy
 
     if n_real_channels is None:
-        n_real_channels = n_channels_mm      # all real by default
+        n_real_channels = n_channels_mm
 
     if n_real_channels > n_channels_mm:
         raise ValueError(

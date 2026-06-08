@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check image shapes in the multimodal dataset before preprocessing.",
     )
     p.add_argument(
-        "-plans_name", default=_MD_PLANS_NAME,
+        "-pl", default=_MD_PLANS_NAME,
         help=(
             f"Name for the patched plans file (default: {_MD_PLANS_NAME}). "
             "nnU-Net's original plans are always kept as nnUNetPlans.json — "
@@ -95,53 +95,45 @@ def main(argv=None) -> int:
             description=f"plan {ds_name}",
         )
 
-    # ── Step 2: Load auto-generated plans (always nnUNetPlans) ───────────────
-    print("\n[nnUNetMD] Patching multimodal plans …")
+    print(f"\n[nnUNetMD] Patching multimodal plans …")
     mm_plans = load_plans(pre_base, mm_name, _NNUNET_DEFAULT_PLANS)
     ss_plans = load_plans(pre_base, ss_name, _NNUNET_DEFAULT_PLANS)
-
+ 
     n_ch_mm = count_channels(mm_raw / "dataset.json")
     n_ch_ss = count_channels(ss_raw / "dataset.json")
-
+ 
     print(f"  Multimodal channels : {n_ch_mm}")
     print(f"  Single-seq channels : {n_ch_ss}")
-
+ 
     if n_ch_mm <= n_ch_ss:
         print(f"  [WARNING] Expected multimodal > single-seq channels "
               f"(got {n_ch_mm} vs {n_ch_ss}).")
-
+ 
     # All n_ch_mm channels in the multimodal dataset contain real image data
-    # → n_real_channels = n_ch_mm (no zero-filled channels at this stage)
+    # at this stage — ZScore applied to all, no zero-filled channels yet.
     patched = patch_multimodal_plans(
         mm_plans,
         ss_plans,
         n_channels_mm   = n_ch_mm,
-        n_real_channels = n_ch_mm,    # all real — ZScore applied to all channels
+        n_real_channels = n_ch_mm,
     )
-
-    # Save as our custom name, leaving nnUNetPlans.json untouched
-    save_plans(pre_base, mm_name, patched, args.plans_name)
-
+ 
+    # ── Step 3: Save patched plans under overwrite_plans_name ─────────────────
+    # Store channel counts so nnUNetTrainerStage2 can read them at runtime
+    # and build the correct N-channel architecture without needing a _MD dataset.
+    patched["nnUNetMD_n_channels_pretrained"] = n_ch_mm
+    patched["nnUNetMD_n_channels_single"]     = n_ch_ss
+ 
+    # nnU-Net's original plans (args.plans_name) are left untouched.
+    save_plans(pre_base, mm_name, patched, args.pl)
+ 
     cfg = patched["configurations"]["3d_fullres"]
     print(f"  patch_size            : {cfg['patch_size']}")
     print(f"  batch_size            : {cfg['batch_size']}")
     print(f"  normalization_schemes : {cfg['normalization_schemes']}")
     print(f"  spacing               : {cfg['spacing']}")
-    print(f"  Saved as              : {args.plans_name}.json  "
-          f"(nnUNetPlans.json untouched)")
-
-    # ── Step 3: Preprocess multimodal with patched plans ──────────────────────
-    print(f"\n[nnUNetMD] Preprocessing {mm_name} with {args.plans_name} …")
-    run_cmd(
-        [
-            "nnUNetv2_preprocess",
-            "-d", str(mm_id),
-            "-c", "3d_fullres",
-            "-plans_name", args.plans_name,   # ← patched plans, not default
-            "-np", str(args.num_processes),
-        ],
-        description=f"preprocess {mm_name}",
-    )
+    print(f"  Original plans        : {args.pl}.json              (untouched)")
+    print(f"  Patched plans saved   : {args.pl}.json")
 
     # ── Step 4: Write metadata ────────────────────────────────────────────────
     write_metadata(
