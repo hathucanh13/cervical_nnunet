@@ -103,8 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _prepare_zf_plans(pre_base: Path, mm_name: str, zf_name: str,
-                      n_ch_mm: int, n_ch_ss: int, plans_name: str) -> None:
+def _prepare_zf_plans(pre_base: Path, raw_base: Path, mm_name: str,
+                      zf_name: str, zf_id: int,
+                      n_ch_mm: int, n_ch_ss: int,
+                      plans_name: str, num_processes: int = 8) -> None:
     """
     Create Stage-2 plans for the zero-filled dataset by patching Stage-1
     multimodal plans:
@@ -113,12 +115,19 @@ def _prepare_zf_plans(pre_base: Path, mm_name: str, zf_name: str,
 
     Geometry (patch_size, spacing) comes from the multimodal Stage-1 plans,
     ensuring the preprocessed data is compatible with the pretrained weights.
+
+    Also materialises the two files that nnU-Net normally writes during its
+    own planning step but that we bypass:
+      * dataset.json            — copied from nnUNet_raw/<zf_name>/
+      * dataset_fingerprint.json — computed by DatasetFingerprintExtractor
+    Both are required by nnUNetv2_preprocess and nnUNetTrainer.on_train_start.
     """
-    mm_plans = load_plans(pre_base, mm_name, plans_name)
-    # Use the mm plans as both source of geometry AND as the base to patch;
-    # we only need ZF-specific normalization overrides.
-    # The ZF dataset has n_ch_mm channels total, n_ch_ss of which are real.
     import copy
+    import shutil
+
+
+
+    mm_plans = load_plans(pre_base, mm_name, plans_name)
     zf_plans = copy.deepcopy(mm_plans)
 
     cfg = zf_plans["configurations"]["3d_fullres"]
@@ -136,8 +145,41 @@ def _prepare_zf_plans(pre_base: Path, mm_name: str, zf_name: str,
     zf_plans["nnUNetMD_n_channels_pretrained"] = n_ch_mm
     zf_plans["nnUNetMD_n_channels_single"]     = n_ch_ss
 
-    (pre_base / zf_name).mkdir(parents=True, exist_ok=True)
+    pre_zf_dir = pre_base / zf_name
+    pre_zf_dir.mkdir(parents=True, exist_ok=True)
     save_plans(pre_base, zf_name, zf_plans, plans_name)
+
+    # -- dataset.json ---------------------------------------------------------
+    # nnU-Net preprocessor and trainer both read dataset.json from the
+    # *preprocessed* folder.  Normally written by nnUNetv2_plan_and_preprocess;
+    # we bypass that step so copy it manually.
+    raw_dataset_json = raw_base / zf_name / "dataset.json"
+    pre_dataset_json = pre_zf_dir / "dataset.json"
+    if not pre_dataset_json.exists():
+        shutil.copy2(raw_dataset_json, pre_dataset_json)
+        print(f"  dataset.json copied   : {pre_dataset_json}")
+    else:
+        print(f"  dataset.json present  : {pre_dataset_json}  (not overwritten)")
+
+    # -- dataset_fingerprint.json ---------------------------------------------
+    # nnUNetTrainer.on_train_start copies this file from preprocessed/ into
+    # the fold output directory.  It is computed from the raw images.
+    # We shell out to the stable public CLI rather than calling the Python API
+    # directly, which avoids fragility around constructor signature changes.
+    pre_fingerprint = pre_zf_dir / "dataset_fingerprint.json"
+    if not pre_fingerprint.exists():
+        print(f"  Extracting dataset fingerprint for {zf_name} ...")
+        run_cmd(
+            [
+                "nnUNetv2_extract_fingerprint",
+                "-d", str(zf_id),
+                "-np", str(num_processes),
+            ],
+            description=f"extract fingerprint {zf_name}",
+        )
+        print(f"  dataset_fingerprint.json written : {pre_fingerprint}")
+    else:
+        print(f"  dataset_fingerprint.json present : {pre_fingerprint}  (not overwritten)")
 
     print(f"  patch_size            : {cfg['patch_size']}")
     print(f"  normalization_schemes : {cfg['normalization_schemes']}")
@@ -201,13 +243,17 @@ def main(argv=None) -> int:
     print(f"  Folds               : {args.folds}")
     print(f"  Channel layout      : ch0=T2w (real), ch1–{n_ch_mm-1}=zeros on disk")
 
-    # ── Step 2: Prepare Stage-2 plans for zero-filled dataset ─────────────────
-    if not args.skip_preprocess:
-        print(f"\n[nnUNetMD] Preparing Stage-2 plans for {zf_name} …")
-        _prepare_zf_plans(pre_base, mm_name, zf_name,
-                          n_ch_mm, n_ch_ss, args.plans_name)
+    # ── Step 2a: Plans + required metadata files (always runs) ───────────────
+    # dataset.json and dataset_fingerprint.json must exist in the preprocessed
+    # folder before nnUNetv2_preprocess or nnUNetTrainer.on_train_start run.
+    # These are cheap to (re-)write and are skipped internally if already
+    # present, so we always call _prepare_zf_plans regardless of --skip-preprocess.
+    print(f"\n[nnUNetMD] Preparing Stage-2 plans for {zf_name} …")
+    _prepare_zf_plans(pre_base, raw_base, mm_name, zf_name, zf_id,
+                      n_ch_mm, n_ch_ss, args.plans_name, args.num_processes)
 
-        # Preprocess the zero-filled dataset with Stage-1 geometry
+    # ── Step 2b: Preprocessing (skippable on resume) ──────────────────────────
+    if not args.skip_preprocess:
         print(f"\n[nnUNetMD] Preprocessing {zf_name} with {args.plans_name} …")
         run_cmd(
             [
@@ -220,7 +266,7 @@ def main(argv=None) -> int:
             description=f"preprocess {zf_name}",
         )
     else:
-        print("  [skip] Preprocessing skipped.")
+        print("  [skip] nnUNetv2_preprocess skipped (--skip-preprocess).")
 
     # ── Step 3: Cross-validation ──────────────────────────────────────────────
     print(f"\n[nnUNetMD] Cross-validation on {zf_name}")
